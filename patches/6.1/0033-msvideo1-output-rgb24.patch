@@ -1,0 +1,115 @@
+From 8e1abc23147a221561292a149273986aa8d5ab4a Mon Sep 17 00:00:00 2001
+From: lanzouyouxiang <dev@ilanzou.app>
+Date: Fri, 20 Nov 2026 11:47:34 +0800
+Subject: [PATCH] avcodec/msvideo1: output RGB24 instead of RGB555 for 16-bit
+
+libmdk maps FFmpeg's RGB555 output to OpenGL UNSIGNED_SHORT_5_5_5_1 (RGBA),
+treating bit15 as alpha. In MS Video 1 16-bit, bit15 is an encoder-mode
+flag (1-color blocks always set it because byte_b >= 0x80; 2/8-color
+blocks clear it in c1..c7), not pixel data. libmdk thus renders ~14% of
+pixels (those with bit15 == 0) as fully transparent, producing garbage.
+
+Convert the 16-bit decode path to output RGB24, which ignores bit15 and is
+natively supported by libmdk.
+---
+ libavcodec/msvideo1.c | 44 +++++++++++++++++++++++++++++++------------
+ 1 file changed, 32 insertions(+), 12 deletions(-)
+
+diff --git a/libavcodec/msvideo1.c b/libavcodec/msvideo1.c
+index ca4583d..fd9758c 100644
+--- a/libavcodec/msvideo1.c
++++ b/libavcodec/msvideo1.c
+@@ -42,6 +42,19 @@
+     return; \
+   }
+ 
++/* Expand a 16-bit RGB555 value into three RGB24 bytes (5-bit component
++ * shifted left to 8-bit). Used by msvideo1_decode_16bit to output RGB24
++ * instead of RGB555, so renderers that only support RGB24/RGB565 (e.g.
++ * libmdk) can display MS Video 1 16-bit frames correctly. */
++#define MSVIDEO1_RGB555_TO_RGB24(dst, v) do { \
++    int _r = ((v) >> 10) & 0x1F; \
++    int _g = ((v) >> 5) & 0x1F; \
++    int _b = (v) & 0x1F; \
++    (dst)[0] = (uint8_t)((_r << 3) | (_r >> 2)); \
++    (dst)[1] = (uint8_t)((_g << 3) | (_g >> 2)); \
++    (dst)[2] = (uint8_t)((_b << 3) | (_b >> 2)); \
++} while (0)
++
+ typedef struct Msvideo1Context {
+ 
+     AVCodecContext *avctx;
+@@ -72,7 +85,7 @@ static av_cold int msvideo1_decode_init(AVCodecContext *avctx)
+             memcpy(s->pal, avctx->extradata, AVPALETTE_SIZE);
+     } else {
+         s->mode_8bit = 0;
+-        avctx->pix_fmt = AV_PIX_FMT_RGB555;
++        avctx->pix_fmt = AV_PIX_FMT_RGB24;
+     }
+ 
+     s->frame = av_frame_alloc();
+@@ -198,16 +211,16 @@ static void msvideo1_decode_16bit(Msvideo1Context *s)
+     unsigned short flags;
+     int skip_blocks;
+     unsigned short colors[8];
+-    unsigned short *pixels = (unsigned short *)s->frame->data[0];
+-    int stride = s->frame->linesize[0] / 2;
++    unsigned char *pixels = s->frame->data[0];
++    int stride = s->frame->linesize[0];
+ 
+     stream_ptr = 0;
+     skip_blocks = 0;
+     blocks_wide = s->avctx->width / 4;
+     blocks_high = s->avctx->height / 4;
+     total_blocks = blocks_wide * blocks_high;
+-    block_inc = 4;
+-    row_dec = stride + 4;
++    block_inc = 12;
++    row_dec = stride + 12;
+ 
+     for (block_y = blocks_high; block_y > 0; block_y--) {
+         block_ptr = ((block_y * 4) - 1) * stride;
+@@ -260,17 +273,22 @@ static void msvideo1_decode_16bit(Msvideo1Context *s)
+                     stream_ptr += 2;
+ 
+                     for (pixel_y = 0; pixel_y < 4; pixel_y++) {
+-                        for (pixel_x = 0; pixel_x < 4; pixel_x++, flags >>= 1)
+-                            pixels[pixel_ptr++] =
++                        for (pixel_x = 0; pixel_x < 4; pixel_x++, flags >>= 1) {
++                            MSVIDEO1_RGB555_TO_RGB24(&pixels[pixel_ptr],
+                                 colors[((pixel_y & 0x2) << 1) +
+-                                    (pixel_x & 0x2) + ((flags & 0x1) ^ 1)];
++                                    (pixel_x & 0x2) + ((flags & 0x1) ^ 1)]);
++                            pixel_ptr += 3;
++                        }
+                         pixel_ptr -= row_dec;
+                     }
+                 } else {
+                     /* 2-color encoding */
+                     for (pixel_y = 0; pixel_y < 4; pixel_y++) {
+-                        for (pixel_x = 0; pixel_x < 4; pixel_x++, flags >>= 1)
+-                            pixels[pixel_ptr++] = colors[(flags & 0x1) ^ 1];
++                        for (pixel_x = 0; pixel_x < 4; pixel_x++, flags >>= 1) {
++                            MSVIDEO1_RGB555_TO_RGB24(&pixels[pixel_ptr],
++                                colors[(flags & 0x1) ^ 1]);
++                            pixel_ptr += 3;
++                        }
+                         pixel_ptr -= row_dec;
+                     }
+                 }
+@@ -279,8 +297,10 @@ static void msvideo1_decode_16bit(Msvideo1Context *s)
+                 colors[0] = (byte_b << 8) | byte_a;
+ 
+                 for (pixel_y = 0; pixel_y < 4; pixel_y++) {
+-                    for (pixel_x = 0; pixel_x < 4; pixel_x++)
+-                        pixels[pixel_ptr++] = colors[0];
++                    for (pixel_x = 0; pixel_x < 4; pixel_x++) {
++                        MSVIDEO1_RGB555_TO_RGB24(&pixels[pixel_ptr], colors[0]);
++                        pixel_ptr += 3;
++                    }
+                     pixel_ptr -= row_dec;
+                 }
+             }
+-- 
+2.55.0.windows.3
+
