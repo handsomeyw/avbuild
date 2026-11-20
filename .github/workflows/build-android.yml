@@ -61,7 +61,13 @@ jobs:
         rm -rf sdk-android-clang32
     - name: Make SDK
       shell: bash
-      run: ./tools/ci-after-build.sh
+      run: |
+        SUFFIX=${FF_VERSION}-${TARGET_OS}${CONFIG_SUFFIX}
+        mv sdk-* ffmpeg-${SUFFIX}
+        TAR=tar
+        which gtar && TAR=gtar
+        $TAR Jcfv ffmpeg-${SUFFIX}{.tar.xz,}
+        ls -lh *.xz
     - name: Archieve SDK
       uses: actions/upload-artifact@v7
       with:
