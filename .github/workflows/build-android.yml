@@ -1,0 +1,69 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'patches/**'
+      - 'config-lite.sh'
+      - 'config-gpl-lite.sh'
+
+env:
+  FF_VERSION: ${{ vars.FF_VER }}
+  LLVM_VER: ${{ vars.LLVM_VER }}
+  LLVM_VER_DEFAULT: 23
+  NINJA_STATUS: '[%f/%t %e %r]'
+  SF_PW_MAPPED: ${{ secrets.SF_PW }}
+  SF_USER_MAPPED: ${{ secrets.SF_USER }}
+  VC_LTL_VER: ${{ vars.VC_LTL_VER }}
+  AMF_VER: ${{ vars.AMF_VER }}
+
+jobs:
+  Android:
+    runs-on: macos-26
+    env:
+      TARGET_OS: android
+      CONFIG_SUFFIX: -${{ matrix.config }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [lite,lite-lto]
+    steps:
+    - uses: actions/checkout@v6
+    - name: 'Restore sysroot cache'
+      id: sysroot-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/sysroot
+        key: sysroot-${{ env.TARGET_OS }}-${{ vars.LINUX_SYSROOT_ID }}
+    - name: Create Build Environment
+      shell: bash
+      env:
+        SYSROOT_CACHE_HIT: ${{ steps.sysroot-cache.outputs.cache-hit }}
+        DEVPKGS_WORKFLOW: no-lto # pkgconfig check dep undefined __tls_get_addr for armv7
+      run: ./tools/ci-before-build.sh
+    - name: Configure and Build 32bit
+      shell: bash
+      run: |
+        export ANDROID_NDK=$ANDROID_NDK_LATEST_HOME
+        export FFSRC=$PWD/ffmpeg-${FF_VERSION}
+        export USER_OPT="--enable-wolfssl"
+        ./avbuild.sh ${TARGET_OS} "armv7 x86"
+        mv sdk-android-clang{,32}
+    - name: Configure and Build 64bit
+      shell: bash
+      run: |
+        export ANDROID_NDK=$ANDROID_NDK_LATEST_HOME
+        export FFSRC=$PWD/ffmpeg-${FF_VERSION}
+        export USER_OPT="--enable-wolfssl"
+        ./avbuild.sh ${TARGET_OS} "arm64 x86_64"
+        rsync -auv --ignore-existing  sdk-android-clang{32/*,}
+        rm -rf sdk-android-clang32
+    - name: Make SDK
+      shell: bash
+      run: ./tools/ci-after-build.sh
+    - name: Archieve SDK
+      uses: actions/upload-artifact@v7
+      with:
+        name: ffmpeg-${{ env.FF_VERSION }}-${{ env.TARGET_OS }}-${{ matrix.config }}
+        path: ffmpeg-*.tar.xz
